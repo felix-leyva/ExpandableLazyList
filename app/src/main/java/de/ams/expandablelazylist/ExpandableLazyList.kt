@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
@@ -37,8 +38,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -49,12 +50,10 @@ import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.abs
-import kotlin.math.absoluteValue
 
 /**
  * PdfViewerComposable
  * A very simple composable that displays a PDF file and allows the user to zoom and pan the page.
- *
  */
 @Composable
 internal fun PdfViewerComposable() {
@@ -96,16 +95,15 @@ internal fun PdfViewerComposable() {
             }
         }
     }
-
 }
-
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun ExpandalbeLazyList(bitmaps: Sequence<Bitmap>) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
-    val gridState = rememberLazyListState()
+    val listState = rememberLazyListState()
+    val flingBehavior = ScrollableDefaults.flingBehavior()
     val scope = rememberCoroutineScope()
     var lastTapTime by remember { mutableLongStateOf(0L) }
     val bitmapWidth by remember { derivedStateOf { bitmaps.first().width * scale } }
@@ -123,7 +121,7 @@ private fun ExpandalbeLazyList(bitmaps: Sequence<Bitmap>) {
                     val velocityTracker = VelocityTracker()
                     // Wait for a touch down event and get the pointer
                     val pointer = awaitFirstDown(requireUnconsumed = true)
-                    velocityTracker.addPosition(pointer.uptimeMillis, pointer.position)
+                    // velocityTracker.addPosition(pointer.uptimeMillis, pointer.position)
 
                     val currentTapTime = pointer.uptimeMillis
                     if (currentTapTime - lastTapTime < 300) {
@@ -134,6 +132,7 @@ private fun ExpandalbeLazyList(bitmaps: Sequence<Bitmap>) {
                             else -> 1f
                         }
                         lastTapTime = 0L
+                        pointer.consume()
                     } else {
                         lastTapTime = currentTapTime
                     }
@@ -141,58 +140,47 @@ private fun ExpandalbeLazyList(bitmaps: Sequence<Bitmap>) {
                     do {
                         // Prepare for drag events and record velocity of a fling.
                         val event = awaitPointerEvent()
-                        var canceled = event.changes.fastAny { it.isConsumed }
+                        if (event.changes.fastAny { it.isConsumed }) break
 
-                        if (!canceled) {
-                            val zoomChange = event.calculateZoom()
-                            val panChange = event.calculatePan()
+                        // Add only drag events to the velocity tracker
+                        if (event.changes.size == 1) {
+                            event.changes.fastForEach(velocityTracker::addPointerInputChange)
+                        }
 
-                            if (!pastTouchSlop) {
-                                zoom *= zoomChange
-                                pan += panChange
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
 
-                                val centroidSize = event.calculateCentroidSize(useCurrent = false)
-                                val zoomMotion = abs(1 - zoom) * centroidSize
+                        if (!pastTouchSlop) {
+                            zoom *= zoomChange
+                            pan += panChange
 
-                                val panMotion = pan.getDistance()
+                            val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                            val zoomMotion = abs(1 - zoom) * centroidSize
 
-                                if (zoomMotion > touchSlop || panMotion > touchSlop) {
-                                    pastTouchSlop = true
-                                }
+                            val panMotion = pan.getDistance()
+
+                            if (zoomMotion > touchSlop || panMotion > touchSlop) {
+                                pastTouchSlop = true
                             }
+                        } else if (zoomChange != 1f || panChange != Offset.Zero) {
+                            val maxOffsetX = (bitmapWidth - size.width) / 2
+                            offsetX = (offsetX + panChange.x).coerceIn(
+                                minimumValue = -maxOffsetX,
+                                maximumValue = maxOffsetX,
+                            )
+                            scope.launch { listState.scrollBy(-panChange.y / scale) }
+                            scale = (scale * zoomChange).coerceIn(1.0f, 3f)
+                            event.changes.fastForEach { it.consume() }
+                        }
+                    } while (event.changes.fastAny { it.pressed })
 
-                            if (pastTouchSlop) {
-                                event.changes.fastForEach { change ->
-                                    velocityTracker.addPosition(
-                                        timeMillis = change.uptimeMillis, position = change.position
-                                    )
-                                }
-
-                                val velocity = (velocityTracker.calculateVelocity())
-
-                                // TODO: this is based in manual test, we need to improve this or find a better way to handle this
-                                val consumeHere =
-                                    zoomChange != 1f || panChange.x.absoluteValue > 5f || velocity.x.absoluteValue > 400f
-
-                                if (consumeHere) {
-                                    scale = (scale * zoomChange).coerceIn(1.0f, 3f)
-                                    val maxOffsetX = (bitmapWidth - size.width) / 2
-                                    offsetX = (offsetX + panChange.x).coerceIn(
-                                        -maxOffsetX, maxOffsetX
-                                    )
-
-                                    scope.launch {
-                                        gridState.scrollBy(-panChange.y / scale)
-                                    }
-                                    event.changes.fastForEach {
-                                        if (it.positionChanged()) {
-                                            it.consume()
-                                        }
-                                    }
-                                }
+                    scope.launch {
+                        listState.scroll {
+                            with(flingBehavior) {
+                                performFling(-(velocityTracker.calculateVelocity()).y)
                             }
                         }
-                    } while (!canceled && event.changes.fastAny { it.pressed })
+                    }
                 }
             }
             .graphicsLayer(
@@ -200,15 +188,15 @@ private fun ExpandalbeLazyList(bitmaps: Sequence<Bitmap>) {
                 scaleY = scale,
                 translationX = offsetX,
             ),
-        state = gridState,
+        state = listState,
         verticalArrangement = Arrangement.Center,
-        userScrollEnabled = true,
+        userScrollEnabled = false,
     ) {
         bitmaps.forEach { page ->
             item {
                 Image(
                     modifier = Modifier
-                        .padding(16.dp)
+                        .padding(vertical = 16.dp)
                         .background(Color.White),
                     bitmap = page.asImageBitmap(),
                     contentDescription = "PDF Page",

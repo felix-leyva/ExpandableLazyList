@@ -55,11 +55,15 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastAny
+import androidx.compose.ui.util.fastCoerceAtLeast
+import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.fastForEach
+import androidx.compose.ui.util.fastSumBy
 import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.absoluteValue
 
 /**
  * PdfViewerComposable
@@ -74,7 +78,7 @@ internal fun PdfViewerComposable() {
     var boxConstraint: Constraints? by remember { mutableStateOf(null) }
 
     LaunchedEffect(Unit, boxConstraint) {
-        val pageWidth =  boxConstraint?.maxWidth ?: return@LaunchedEffect
+        val pageWidth = boxConstraint?.maxWidth ?: return@LaunchedEffect
         val fileName = "sample2.pdf"
         val file = File(context.cacheDir, fileName)
         if (!file.exists()) {
@@ -86,7 +90,7 @@ internal fun PdfViewerComposable() {
         val pdfRenderer =
             PdfRenderer(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY))
         pdfContent = sequence {
-            val pageCount = 20 //pdfRenderer.pageCount
+            val pageCount = 10 //pdfRenderer.pageCount
             for (i in 0 until pageCount) {
                 val page = pdfRenderer.openPage(i)
                 val scale = pageWidth.toFloat() / page.width
@@ -108,7 +112,7 @@ internal fun PdfViewerComposable() {
                 LaunchedEffect(Unit) {
                     boxConstraint = constraints
                 }
-                
+
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             }
         }
@@ -127,17 +131,17 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
     var lastTapTime by remember { mutableLongStateOf(0L) }
     val unscaledWidth: Int by remember { derivedStateOf { constraints.minWidth } }
     val bitmapWidth by remember { derivedStateOf { unscaledWidth * scale } }
-    val unscaledHeight by remember { derivedStateOf { constraints.minHeight }}
+    val unscaledHeight by remember { derivedStateOf { constraints.minHeight } }
     val height by remember { derivedStateOf { unscaledHeight * scale } }
-    
-    
+    val paddingBetweenPages = 16
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .scrollbar(state = listState, horizontal = false)
     ) {
         LazyColumn(
-            verticalArrangement = Arrangement.Top,
+            verticalArrangement = Arrangement.Center,
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
@@ -200,11 +204,12 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
 
                             } else if (zoomChange != 1f || panChange != Offset.Zero) {
                                 // Change the scale between 1 and 3
-                                scale = (scale * zoomChange).coerceIn(1.0f, 3f)
+                                scale = (scale * zoomChange).fastCoerceIn(1.0f, 3f)
 
                                 // Calculate the maximum offset we can move in x in each direction
+
                                 val maxOffsetX = (bitmapWidth - unscaledWidth) / 2
-                                offsetX = (offsetX + panChange.x).coerceIn(
+                                offsetX = (offsetX + panChange.x).fastCoerceIn(
                                     minimumValue = -maxOffsetX,
                                     maximumValue = maxOffsetX,
                                 )
@@ -214,11 +219,17 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
                                 //  We consume the offsetY events and scroll the list once the offsetY is again in 0
                                 when {
                                     offsetY != 0f || (scale != 1f && (!listState.canScrollBackward && panChange.y > 0) || (!listState.canScrollForward && panChange.y < 0)) -> {
-                                        val maxOffsetY = (height - unscaledHeight) / 2
-                                        offsetY = (offsetY + panChange.y).coerceIn(
-                                            minimumValue = -maxOffsetY,
-                                            maximumValue = maxOffsetY,
-                                        )
+                                        val heightOfPages =
+                                            bitmaps.fastSumBy { it.height } + (bitmaps.size * paddingBetweenPages * 2 * density)
+                                        val emptySpace =
+                                            ((unscaledHeight - heightOfPages) * scale)
+                                                .fastCoerceAtLeast(0f)
+
+                                        val maxOffsetY =
+                                            ((height - unscaledHeight - emptySpace) / 2).absoluteValue
+
+                                        offsetY = (offsetY + panChange.y)
+                                            .fastCoerceIn(-maxOffsetY, maxOffsetY)
                                     }
 
                                     offsetY == 0f -> scope.launch { listState.scrollBy(-panChange.y / scale) }
@@ -230,7 +241,7 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
                             }
                         } while (event.changes.fastAny { it.pressed })
 
-                        // We need to perform with the velocity we had at the end of the gesture a scroll
+                        // We need to perform with the velocity we had at the end of the gesture a s˛·croll
                         //  using the fling behavior of the lazy list
                         scope.launch {
                             listState.scroll {
@@ -254,7 +265,7 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
                 item {
                     Image(
                         modifier = Modifier
-                            .padding(vertical = 16.dp)
+                            .padding(vertical = paddingBetweenPages.dp)
                             .background(Color.White),
                         bitmap = page.asImageBitmap(),
                         contentDescription = "PDF Page",

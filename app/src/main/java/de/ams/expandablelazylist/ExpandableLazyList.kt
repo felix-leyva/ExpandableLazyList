@@ -1,6 +1,7 @@
 package de.ams.expandablelazylist
 
 import android.annotation.SuppressLint
+import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
 import android.graphics.pdf.content.PdfPageGotoLinkContent
 import android.graphics.pdf.content.PdfPageLinkContent
@@ -62,6 +63,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -92,7 +95,7 @@ internal fun PdfViewerComposable() {
 
     LaunchedEffect(Unit, boxConstraint) {
         val pageWidth = boxConstraint?.maxWidth ?: return@LaunchedEffect
-        val fileName = "sample.pdf"
+        val fileName = "sample2.pdf"
         val file = File(context.cacheDir, fileName)
         if (!file.exists()) {
             val pdfFile = context.assets.open(fileName)
@@ -107,11 +110,10 @@ internal fun PdfViewerComposable() {
             for (i in 0 until pageCount) {
                 val page = pdfRenderer.openPage(i)
                 val scale = pageWidth.toFloat() / page.width
-                val height = page.height * scale
-                val width = page.width * scale
-                val bitmap = createBitmap(width = width.toInt(), height = height.toInt())
-
-
+                val scaledHeight = page.height * scale
+                val scaledWidth = page.width * scale
+                val bitmap = createBitmap(width = scaledWidth.toInt(), height = scaledHeight.toInt())
+                
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                 val content: PdfContent =
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
@@ -126,8 +128,9 @@ internal fun PdfViewerComposable() {
                                     }, it.uri)
                                 },
                                 texts = textContents.mapIfNotEmpty {
-                                    if (it.bounds.isEmpty()) it else PdfPageTextContent(
-                                        it.text, it.bounds.map { it.times(scale) })
+                                    val textBounds = if (it.bounds.isEmpty()) listOf(RectF(0f, 0f, page.width.toFloat(), page.height.toFloat())) else it.bounds
+                                    PdfPageTextContent(
+                                        it.text, textBounds.map { it.times(scale) })
                                 },
                                 images = imageContents,
                                 goToLinks = gotoLinks.mapIfNotEmpty {
@@ -136,7 +139,7 @@ internal fun PdfViewerComposable() {
                                             scale
                                         )
                                     }, it.destination)
-                                } // TODO: change also destination with the factor scale
+                                } // TODO: change also destination internal links offsets with the factor scale
                             )
                         }
                     } else {
@@ -173,23 +176,43 @@ internal fun PdfViewerComposable() {
                                 if (SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13) {
                                     val density = LocalDensity.current.density
                                     val uriHandler = LocalUriHandler.current
-
-                                    content.links.forEach { link ->
-                                        val linkBounds =
-                                            link.bounds.firstOrNull()?.times(1 / density)
+                                    
+                                    content.texts.forEach { text ->
+                                        val scaledBounds =
+                                            text.bounds.firstOrNull()?.times(1 / density)
                                                 ?: return@forEach
                                         Box(
                                             modifier = Modifier
-                                                .offset(linkBounds.left.dp, linkBounds.top.dp)
-                                                .background(Color.Blue.copy(alpha = 0.25f))
-                                                .size(
-                                                    width = linkBounds.width().dp,
-                                                    height = linkBounds.height().dp
-                                                )
-                                                .clickable {
-                                                    uriHandler.openUri(URLUtil.guessUrl(link.uri.toString()))
+                                                .semantics {
+                                                    contentDescription = text.text
                                                 }
+                                                .offset(scaledBounds.left.dp, scaledBounds.top.dp)
+                                                .background(Color.Transparent)
+                                                .size(
+                                                    width = scaledBounds.width().dp,
+                                                    height = scaledBounds.height().dp
+                                                )
                                         )
+                                    }
+                                    content.links.forEach { link ->
+                                        link.bounds.forEach { linkBounds ->
+                                            val scaledBounds = linkBounds.times(1 / density)
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(
+                                                        scaledBounds.left.dp,
+                                                        scaledBounds.top.dp
+                                                    )
+                                                    .background(Color.Blue.copy(alpha = 0.25f))
+                                                    .size(
+                                                        width = scaledBounds.width().dp,
+                                                        height = scaledBounds.height().dp
+                                                    )
+                                                    .clickable {
+                                                        uriHandler.openUri(URLUtil.guessUrl(link.uri.toString()))
+                                                    }
+                                            )
+                                        }
                                     }
                                 }
                             }

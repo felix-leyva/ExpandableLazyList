@@ -1,14 +1,20 @@
 package de.ams.expandablelazylist
 
 import android.annotation.SuppressLint
-import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
+import android.graphics.pdf.content.PdfPageGotoLinkContent
+import android.graphics.pdf.content.PdfPageLinkContent
+import android.graphics.pdf.content.PdfPageTextContent
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.ext.SdkExtensions
+import android.webkit.URLUtil
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -20,8 +26,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,6 +60,8 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -60,10 +71,12 @@ import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.fastForEach
 import androidx.compose.ui.util.fastSumBy
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.times
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.absoluteValue
+
 
 /**
  * PdfViewerComposable
@@ -74,12 +87,12 @@ import kotlin.math.absoluteValue
 internal fun PdfViewerComposable() {
     val context = LocalContext.current
 
-    var pdfContent: Sequence<Bitmap>? by remember { mutableStateOf(null) }
+    var pdfContent: Sequence<PdfContent>? by remember { mutableStateOf(null) }
     var boxConstraint: Constraints? by remember { mutableStateOf(null) }
 
     LaunchedEffect(Unit, boxConstraint) {
         val pageWidth = boxConstraint?.maxWidth ?: return@LaunchedEffect
-        val fileName = "sample2.pdf"
+        val fileName = "sample.pdf"
         val file = File(context.cacheDir, fileName)
         if (!file.exists()) {
             val pdfFile = context.assets.open(fileName)
@@ -90,23 +103,100 @@ internal fun PdfViewerComposable() {
         val pdfRenderer =
             PdfRenderer(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY))
         pdfContent = sequence {
-            val pageCount = 10 //pdfRenderer.pageCount
+            val pageCount = pdfRenderer.pageCount
             for (i in 0 until pageCount) {
                 val page = pdfRenderer.openPage(i)
                 val scale = pageWidth.toFloat() / page.width
                 val height = page.height * scale
                 val width = page.width * scale
                 val bitmap = createBitmap(width = width.toInt(), height = height.toInt())
+
+
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                val content: PdfContent =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                        with(page) {
+                            PdfContent(
+                                image = bitmap.asImageBitmap(),
+                                links = linkContents.mapIfNotEmpty {
+                                    PdfPageLinkContent(it.bounds.map {
+                                        it.times(
+                                            scale
+                                        )
+                                    }, it.uri)
+                                },
+                                texts = textContents.mapIfNotEmpty {
+                                    if (it.bounds.isEmpty()) it else PdfPageTextContent(
+                                        it.text, it.bounds.map { it.times(scale) })
+                                },
+                                images = imageContents,
+                                goToLinks = gotoLinks.mapIfNotEmpty {
+                                    PdfPageGotoLinkContent(it.bounds.map {
+                                        it.times(
+                                            scale
+                                        )
+                                    }, it.destination)
+                                } // TODO: change also destination with the factor scale
+                            )
+                        }
+                    } else {
+                        PdfContent(image = bitmap.asImageBitmap())
+                    }
                 page.close()
-                yield(bitmap)
+                yield(content)
             }
         }
     }
 
-    AnimatedContent(pdfContent) {
-        if (it != null) {
-            boxConstraint?.let { constraints -> ExpandableLazyList(it.toList(), constraints) }
+    AnimatedContent(pdfContent) { pdfContents ->
+        if (pdfContents != null) {
+            boxConstraint?.let { constraints ->
+                ExpandableLazyList(
+                    elementSizes = pdfContents.map {
+                        Size(
+                            it.image.width.toFloat(), it.image.height.toFloat()
+                        )
+                    }.toList(), constraints = constraints
+                ) { paddingBetweenPages ->
+                    pdfContents.forEach { content ->
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .padding(vertical = paddingBetweenPages.dp)
+                                    .background(Color.White)
+                            ) {
+                                Image(
+                                    bitmap = content.image,
+                                    contentDescription = "PDF Page",
+                                    contentScale = ContentScale.Fit,
+                                )
+                                if (SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13) {
+                                    val density = LocalDensity.current.density
+                                    val uriHandler = LocalUriHandler.current
+
+                                    content.links.forEach { link ->
+                                        val linkBounds =
+                                            link.bounds.firstOrNull()?.times(1 / density)
+                                                ?: return@forEach
+                                        Box(
+                                            modifier = Modifier
+                                                .offset(linkBounds.left.dp, linkBounds.top.dp)
+                                                .background(Color.Blue.copy(alpha = 0.25f))
+                                                .size(
+                                                    width = linkBounds.width().dp,
+                                                    height = linkBounds.height().dp
+                                                )
+                                                .clickable {
+                                                    uriHandler.openUri(URLUtil.guessUrl(link.uri.toString()))
+                                                }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 LaunchedEffect(Unit) {
@@ -121,7 +211,13 @@ internal fun PdfViewerComposable() {
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) {
+private fun ExpandableLazyList(
+    elementSizes: List<Size>,
+    constraints: Constraints,
+    paddingBetweenPages: Int = 16,
+    modifier: Modifier = Modifier,
+    listComposable: LazyListScope.(paddingBetweenPages: Int) -> Unit = {}
+) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
@@ -133,10 +229,10 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
     val bitmapWidth by remember { derivedStateOf { unscaledWidth * scale } }
     val unscaledHeight by remember { derivedStateOf { constraints.minHeight } }
     val height by remember { derivedStateOf { unscaledHeight * scale } }
-    val paddingBetweenPages = 16
+
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .scrollbar(state = listState, horizontal = false)
     ) {
@@ -220,16 +316,18 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
                                 when {
                                     offsetY != 0f || (scale != 1f && (!listState.canScrollBackward && panChange.y > 0) || (!listState.canScrollForward && panChange.y < 0)) -> {
                                         val heightOfPages =
-                                            bitmaps.fastSumBy { it.height } + (bitmaps.size * paddingBetweenPages * 2 * density)
+                                            elementSizes.fastSumBy { it.height.toInt() } + (elementSizes.size * paddingBetweenPages * 2 * density)
                                         val emptySpace =
-                                            ((unscaledHeight - heightOfPages) * scale)
-                                                .fastCoerceAtLeast(0f)
+                                            ((unscaledHeight - heightOfPages) * scale).fastCoerceAtLeast(
+                                                0f
+                                            )
 
                                         val maxOffsetY =
                                             ((height - unscaledHeight - emptySpace) / 2).absoluteValue
 
-                                        offsetY = (offsetY + panChange.y)
-                                            .fastCoerceIn(-maxOffsetY, maxOffsetY)
+                                        offsetY = (offsetY + panChange.y).fastCoerceIn(
+                                            -maxOffsetY, maxOffsetY
+                                        )
                                     }
 
                                     offsetY == 0f -> scope.launch { listState.scrollBy(-panChange.y / scale) }
@@ -260,20 +358,7 @@ private fun ExpandableLazyList(bitmaps: List<Bitmap>, constraints: Constraints) 
                 },
             state = listState,
             userScrollEnabled = false,
-        ) {
-            bitmaps.forEach { page ->
-                item {
-                    Image(
-                        modifier = Modifier
-                            .padding(vertical = paddingBetweenPages.dp)
-                            .background(Color.White),
-                        bitmap = page.asImageBitmap(),
-                        contentDescription = "PDF Page",
-                        contentScale = ContentScale.Fit,
-                    )
-                }
-            }
-        }
+            content = { listComposable(paddingBetweenPages) })
     }
 }
 
@@ -464,3 +549,6 @@ fun Modifier.scrollbar(
         }
     }
 }
+
+private inline fun <T> List<T>.mapIfNotEmpty(transform: (T) -> T): List<T> =
+    if (isEmpty()) this else map(transform)

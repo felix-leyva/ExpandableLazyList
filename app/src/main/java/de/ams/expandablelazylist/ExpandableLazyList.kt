@@ -2,7 +2,9 @@ package de.ams.expandablelazylist
 
 import android.annotation.SuppressLint
 import android.graphics.RectF
-import android.graphics.pdf.PdfRenderer
+import android.graphics.pdf.PdfRendererPreV
+import android.graphics.pdf.RenderParams
+import android.graphics.pdf.RenderParams.RENDER_MODE_FOR_DISPLAY
 import android.graphics.pdf.content.PdfPageGotoLinkContent
 import android.graphics.pdf.content.PdfPageLinkContent
 import android.graphics.pdf.content.PdfPageTextContent
@@ -95,7 +97,7 @@ internal fun PdfViewerComposable() {
 
     LaunchedEffect(Unit, boxConstraint) {
         val pageWidth = boxConstraint?.maxWidth ?: return@LaunchedEffect
-        val fileName = "sample2.pdf"
+        val fileName = "sample.pdf"
         val file = File(context.cacheDir, fileName)
         if (!file.exists()) {
             val pdfFile = context.assets.open(fileName)
@@ -103,48 +105,56 @@ internal fun PdfViewerComposable() {
                 pdfFile.copyTo(output)
             }
         }
-        val pdfRenderer =
-            PdfRenderer(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY))
+
         pdfContent = sequence {
+
+            val pdfRenderer = if (SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13) {
+                PdfRendererPreV(
+                    ParcelFileDescriptor.open(
+                        file, ParcelFileDescriptor.MODE_READ_ONLY
+                    )
+                )
+            } else {
+                return@sequence
+            }
+
             val pageCount = pdfRenderer.pageCount
+
             for (i in 0 until pageCount) {
                 val page = pdfRenderer.openPage(i)
                 val scale = pageWidth.toFloat() / page.width
                 val scaledHeight = page.height * scale
                 val scaledWidth = page.width * scale
-                val bitmap = createBitmap(width = scaledWidth.toInt(), height = scaledHeight.toInt())
-                
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                val content: PdfContent =
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-                        with(page) {
-                            PdfContent(
-                                image = bitmap.asImageBitmap(),
-                                links = linkContents.mapIfNotEmpty {
-                                    PdfPageLinkContent(it.bounds.map {
-                                        it.times(
-                                            scale
-                                        )
-                                    }, it.uri)
-                                },
-                                texts = textContents.mapIfNotEmpty {
-                                    val textBounds = if (it.bounds.isEmpty()) listOf(RectF(0f, 0f, page.width.toFloat(), page.height.toFloat())) else it.bounds
-                                    PdfPageTextContent(
-                                        it.text, textBounds.map { it.times(scale) })
-                                },
-                                images = imageContents,
-                                goToLinks = gotoLinks.mapIfNotEmpty {
-                                    PdfPageGotoLinkContent(it.bounds.map {
-                                        it.times(
-                                            scale
-                                        )
-                                    }, it.destination)
-                                } // TODO: change also destination internal links offsets with the factor scale
+                val bitmap =
+                    createBitmap(width = scaledWidth.toInt(), height = scaledHeight.toInt())
+
+                page.render(
+                    bitmap, null, null, RenderParams.Builder(RENDER_MODE_FOR_DISPLAY).build()
+                )
+                val content: PdfContent = with(page) {
+                    PdfContent(image = bitmap.asImageBitmap(), links = linkContents.mapIfNotEmpty {
+                        PdfPageLinkContent(it.bounds.map {
+                            it.times(
+                                scale
                             )
-                        }
-                    } else {
-                        PdfContent(image = bitmap.asImageBitmap())
-                    }
+                        }, it.uri)
+                    }, texts = textContents.mapIfNotEmpty {
+                        val textBounds = if (it.bounds.isEmpty()) listOf(
+                            RectF(
+                                0f, 0f, page.width.toFloat(), page.height.toFloat()
+                            )
+                        ) else it.bounds
+                        PdfPageTextContent(
+                            it.text, textBounds.map { it.times(scale) })
+                    }, images = imageContents, goToLinks = gotoLinks.mapIfNotEmpty {
+                        PdfPageGotoLinkContent(it.bounds.map {
+                            it.times(
+                                scale
+                            )
+                        }, it.destination)
+                    } // TODO: change also destination internal links offsets with the factor scale
+                    )
+                }
                 page.close()
                 yield(content)
             }
@@ -176,23 +186,21 @@ internal fun PdfViewerComposable() {
                                 if (SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13) {
                                     val density = LocalDensity.current.density
                                     val uriHandler = LocalUriHandler.current
-                                    
+
                                     content.texts.forEach { text ->
                                         val scaledBounds =
                                             text.bounds.firstOrNull()?.times(1 / density)
                                                 ?: return@forEach
-                                        Box(
-                                            modifier = Modifier
-                                                .semantics {
-                                                    contentDescription = text.text
-                                                }
-                                                .offset(scaledBounds.left.dp, scaledBounds.top.dp)
-                                                .background(Color.Transparent)
-                                                .size(
-                                                    width = scaledBounds.width().dp,
-                                                    height = scaledBounds.height().dp
-                                                )
-                                        )
+                                        Box(modifier = Modifier
+                                            .semantics {
+                                                contentDescription = text.text
+                                            }
+                                            .offset(scaledBounds.left.dp, scaledBounds.top.dp)
+                                            .background(Color.Transparent)
+                                            .size(
+                                                width = scaledBounds.width().dp,
+                                                height = scaledBounds.height().dp
+                                            ))
                                     }
                                     content.links.forEach { link ->
                                         link.bounds.forEach { linkBounds ->
@@ -200,8 +208,7 @@ internal fun PdfViewerComposable() {
                                             Box(
                                                 modifier = Modifier
                                                     .offset(
-                                                        scaledBounds.left.dp,
-                                                        scaledBounds.top.dp
+                                                        scaledBounds.left.dp, scaledBounds.top.dp
                                                     )
                                                     .background(Color.Blue.copy(alpha = 0.25f))
                                                     .size(
@@ -210,8 +217,7 @@ internal fun PdfViewerComposable() {
                                                     )
                                                     .clickable {
                                                         uriHandler.openUri(URLUtil.guessUrl(link.uri.toString()))
-                                                    }
-                                            )
+                                                    })
                                         }
                                     }
                                 }

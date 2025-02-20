@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "de.ams.expandablelazylist"
     compileSdk = 35
+    compileSdkExtension = 14
 
     defaultConfig {
         applicationId = "de.ams.expandablelazylist"
